@@ -1,0 +1,171 @@
+---
+sidebar_position: 3
+title: BigQuery Profiler Details
+---
+import Admonition from '@theme/Admonition';
+
+# BigQuery Profiler Details
+
+- [Prerequisites](#prerequisites)
+- [Configure Connection to BigQuery](#configure-connection-to-bigquery)
+- [Execute the profiler](#execute-the-profiler)
+- [Generate the dashboard](#generate-the-dashboard)
+
+## Prerequisites
+
+### 1. Download
+- gcloud CLI (https://cloud.google.com/sdk/docs/install)
+
+- No driver install required for the BigQuery profiler
+
+### 2. Authenticate to GCP
+
+The profiler authenticates with [Application Default Credentials (ADC)](https://docs.cloud.google.com/docs/authentication/application-default-credentials). The simplest setup is:
+
+```bash
+gcloud auth application-default login
+```
+
+For more options, please review the docs.
+
+### 3. Required IAM permissions on the target BigQuery project(s)
+
+The executing identity needs the following permissions. `roles/bigquery.admin` covers all of them; for least-privilege deployments grant the discrete permissions below.
+
+```
+bigquery.jobs.create
+bigquery.jobs.list
+bigquery.datasets.get
+bigquery.datasets.getIamPolicy
+bigquery.tables.get
+bigquery.tables.getData
+bigquery.routines.list
+bigquery.readSessions.create
+bigquery.reservations.list                  # Editions customers only
+bigquery.reservationAssignments.list        # Editions customers only
+bigquery.capacityCommitments.list           # Editions customers only
+```
+
+### 4. INFORMATION_SCHEMA / region-scoped views accessed
+
+| Profiler aspect | Region-scoped view | Required permission |
+|---|---|---|
+| Job history (workload, timeline, fulfillment, jobs-by-reservation) | `region-{region}.INFORMATION_SCHEMA.JOBS_BY_PROJECT`, `JOBS_TIMELINE` | `bigquery.jobs.list` (job-owner sees own jobs; admin sees all) |
+| Table storage | `region-{region}.INFORMATION_SCHEMA.TABLE_STORAGE_BY_PROJECT` | `bigquery.tables.get` + `bigquery.tables.getData` |
+| Streaming inserts | `region-{region}.INFORMATION_SCHEMA.STREAMING_TIMELINE_BY_PROJECT` | `bigquery.jobs.list` |
+| Write API | `region-{region}.INFORMATION_SCHEMA.WRITE_API_TIMELINE_BY_PROJECT` | `bigquery.jobs.list` |
+| Reservation timeline | `region-{region}.INFORMATION_SCHEMA.RESERVATIONS_TIMELINE`, `RESERVATION_CHANGES` | `bigquery.reservations.list` |
+| Capacity commitments | `region-{region}.INFORMATION_SCHEMA.CAPACITY_COMMITMENT_CHANGES_BY_PROJECT` | `bigquery.capacityCommitments.list` (admin project only) |
+
+:::warning Attention:
+Skip the reservation/commitment permissions if the customer is on **Pay-as-you-go pricing** rather than BigQuery Editions. The corresponding SQL files will return empty results — harmless — and the dashboard widgets will just be empty. You can also set `exclude_reservations_data: true` during configuration to skip those queries entirely (saves BigQuery slot time; the corresponding DuckDB tables are still created as empty stubs so the dashboard's commitment/consumption widgets resolve cleanly).
+:::
+
+:::warning Attention:
+Some queries (commitments, capacity commitments) only return data when run against the customer's **administrative project** — the one that owns the BigQuery Edition slot reservations. For non-admin projects they return empty.
+:::
+
+## Configure Connection to BigQuery
+
+```console
+databricks labs lakebridge configure-database-profiler
+
+Please select the source system you want to configure
+[0] bigquery
+[1] mssql
+[2] synapse
+Enter a number between 0 and 2: 0
+
+(local | env)
+local means values are read as plain text
+env means values are read from environment variables, and fall back to plain text if not variable is not found
+
+Enter secret vault type (local | env)
+[0] env
+[1] local
+Enter a number between 0 and 1: 1
+Please provide BigQuery connection settings:
+
+Project/region pairs are entered as `project.region`, comma-separated.
+Example: my-proj-a.us, my-proj-b.eu-west-1
+
+Enter BigQuery project/region pairs (project.region, comma-separated): customer-prod-1.us, customer-admin.us
+Enter profiling window in days (default: 180):
+Enter max parallel SQLs per (project, region) iteration (default: 8):
+Please configure profiler settings:
+Redact query text in extracted data? (default: no):
+Exclude reservations and commitments data? (default: no):
+Exclude streaming and write API summary? (default: no):
+```
+
+The resulting `~/.databricks/labs/lakebridge/.credentials.yml` looks like:
+
+```yaml
+secret_vault_type: local
+secret_vault_name: null
+bigquery:
+  pairs:
+    - project: customer-prod-1
+      region: us
+    - project: customer-admin
+      region: us
+  profiling_window_days: 180
+  max_parallel_sqls: 8
+  profiler:
+    redact_query_text: false
+    exclude_reservations_data: false
+    exclude_streaming_metrics: false
+```
+
+## Execute the profiler
+
+```bash
+databricks labs lakebridge execute-database-profiler --source-tech bigquery
+```
+
+The pipeline runs `bq_metadata_extract` — connects to BigQuery and runs 16 vendored SQL queries serially across the configured `(project, region)` pairs and in parallel within each iteration (`max_parallel_sqls` workers). Results land in `~/.databricks/labs/lakebridge_profilers/bigquery_assessment/profiler_extract.db` (DuckDB).
+
+The final DuckDB contains **12 analysis tables** by default (one per `analysis_type`).
+
+Setting `exclude_reservations_data: true` skips the 6 reservation/commitment BigQuery queries — the corresponding DuckDB tables are still created (empty) so the dashboard renders cleanly.
+
+## Generate the dashboard
+
+```bash
+databricks labs lakebridge visualize-profiler-results
+```
+
+The catalog and schema you select here are **baked into the dashboard SQL at deploy time** — there are no filter widgets to switch them at runtime (matches the Synapse and MSSQL profiler conventions).
+
+Fully interactive — prompts for source-tech (pick `bigquery`), extract file path, then catalog / schema / volume:
+
+```console
+Select the source technology
+[0] bigquery
+[1] mssql
+[2] synapse
+Enter a number between 0 and 2: 0
+Enter the path to the profiler extract file (default: ~/.databricks/labs/lakebridge_profilers/bigquery_assessment/profiler_extract.db):
+Configuring profiler dashboard metadata.
+Enter catalog name (default: remorph): my_lakebridge_catalog
+Catalog `my_lakebridge_catalog` doesn't exist. Create it? (default: no): yes
+Enter schema name (default: bigquery_profiler):
+Schema `bigquery_profiler` doesn't exist in catalog `my_lakebridge_catalog`. Create it? (default: no): yes
+Enter volume name (default: ingestion_volume):
+Volume `ingestion_volume` doesn't exist in catalog `my_lakebridge_catalog` and schema `bigquery_profiler`. Create it? (default: no): yes
+Open config file https://<workspace>/#workspace/Users/<you>/.lakebridge/profiler_dashboard.yml in the browser? (default: no):
+```
+
+The `Create it?` confirms only appear when the catalog / schema / volume don't already exist — pre-existing resources are detected and reused silently.
+
+:::warning Attention:
+Each source-tech writes to its own default schema (`bigquery_profiler` for BigQuery, `mssql_profiler` for MSSQL, `synapse_profiler` for Synapse). Reusing one schema across source-techs is not supported and may overwrite tables.
+:::
+
+This deploys:
+
+- The Lakeview dashboard `lakebridge_bigquery_profiler_summary` to your workspace.
+- An ingestion job that uploads the DuckDB extract to UC and writes one Delta table per DuckDB table under `<catalog>.<schema>`.
+- A `validation_report` Delta table summarizing extract health (WARN-everywhere — non-blocking).
+
+[Back to Configure Profiler](../#configure-profiler)

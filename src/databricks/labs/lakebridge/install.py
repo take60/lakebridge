@@ -464,11 +464,13 @@ class WorkspaceInstaller:
         extract_file_path = self._prompts.question(
             "Enter the path to the profiler extract file:",
             default=str(
-                Path("~/.databricks/labs/lakebridge_profilers/synapse_assessment/profiler_extract.db").expanduser()
+                Path(
+                    f"~/.databricks/labs/lakebridge_profilers/{source_tech}_assessment/profiler_extract.db"
+                ).expanduser()
             ),
         )
 
-        metadata_config = self._prompt_for_profiler_dashboard_metadata_config()
+        metadata_config = self._prompt_for_profiler_dashboard_metadata_config(source_tech)
 
         return ProfilerDashboardConfig(
             source_tech=source_tech,
@@ -476,13 +478,16 @@ class WorkspaceInstaller:
             metadata_config=metadata_config,
         )
 
-    def _prompt_for_profiler_dashboard_metadata_config(self) -> ProfilerDashboardMetadataConfig:
+    def _prompt_for_profiler_dashboard_metadata_config(
+        self, source_tech: str | None = None
+    ) -> ProfilerDashboardMetadataConfig:
         logger.info("Configuring profiler dashboard metadata.")
         catalog = self._configure_catalog()
-        schema = self._configure_schema(
-            catalog,
-            "profiler",
-        )
+        # Schema-per-source convention: each source-tech writes to its own `<source>_profiler`
+        # schema. Customers upgrading from a pre-convention install can copy their existing
+        # `profiler` schema to the new `<source>_profiler` schema manually.
+        schema_default = f"{source_tech}_profiler" if source_tech else "profiler"
+        schema = self._configure_schema(catalog, schema_default)
         volume = self._configure_volume(catalog, schema, "ingestion_volume")
         self._has_necessary_access(catalog, schema, volume)
         return ProfilerDashboardMetadataConfig(catalog=catalog, schema=schema, volume=volume)
